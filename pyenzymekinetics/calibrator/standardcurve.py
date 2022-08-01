@@ -5,7 +5,7 @@ from typing import Dict, Callable
 
 
 from scipy.optimize import curve_fit
-from numpy import ndarray, linspace
+from numpy import ndarray, linspace, tile
 import matplotlib.pyplot as plt
 
 
@@ -67,6 +67,13 @@ class StandardCurve():
 
     def fit_models(self):
         for model in self.models.values():
+
+            # Check data shape, and adjust shape for multiple replicates
+            if self.absorption.shape != self.concentration.shape and len(self.concentration.shape) == 1:
+                abso_shape = self.absorption.shape
+                self.concentration = tile(self.concentration,(abso_shape[0], 1))
+                self.concentration = self.concentration.flatten()
+                self.absorption = self.absorption.flatten()
 
             # Get parameter estimates
             result = curve_fit(
