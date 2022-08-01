@@ -41,7 +41,10 @@ class KineticModel():
             parameters.add("ki", value=0.01, min=0.0001, max=0.9999)
 
         if "kpi" in self.params:
-            parameters.add("kpi", value=0.01, min=0.0001, max=0.9999)
+            parameters.add("kpi", value=0.01, min=0.0001, max=1)
+
+        if "a" in self.params:
+            parameters.add("a", value=0.1, min=0.0001, max=0.9999)
 
         return parameters
 
@@ -72,7 +75,7 @@ def menten_irreversible_enzyme_inact(w0: tuple, t, params) -> tuple:
 
     return (dc_S, dc_E, dc_P)
 
-
+# TODO: model with product inhibition
 def menten_irreversible_inhibition(w0: tuple, t, params) -> tuple:
     cS, cE, cP, cI = w0
 
@@ -102,6 +105,30 @@ def menten_irreversible_inhibition_enz_inact(w0: tuple, t, params) -> tuple:
     dc_I = 0
 
     return (dc_S, dc_E, dc_P, dc_I)
+
+# Models if product is absorbing
+
+def subabs_menten_irreversible(w, t, params):
+    '''
+    Differential equations
+    Arguments:
+        w: vector of state variables, here only one: w = [S]
+        t: time
+        params: parameters
+    '''
+    cS, cE, cP, cS0 = w
+    
+    K_m = params['Km'].value
+    k_cat = params["k_cat"].value
+    a = params["a"].value
+    
+    dc_S = (-k_cat*cE*(cS-a*cS0))/(K_m+(cS-a*cS0)/(1-a))
+    dc_E = 0
+    dc_P = -dc_S
+    dc_S0 = 0
+    
+
+    return (dc_S, dc_E, dc_P, dc_S0)
 
 
 if __name__ == "__main__":

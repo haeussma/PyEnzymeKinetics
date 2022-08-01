@@ -1,6 +1,6 @@
 from opcode import haslocal
 from pyenzymekinetics.utility.initial_parameters import get_initial_vmax, get_initial_Km
-from pyenzymekinetics.parameterestimator.models import KineticModel, menten_irreversible, menten_irreversible_enzyme_inact, menten_irreversible_inhibition
+from pyenzymekinetics.parameterestimator.models import KineticModel, menten_irreversible, menten_irreversible_enzyme_inact, menten_irreversible_inhibition, subabs_menten_irreversible
 
 from typing import Dict
 from matplotlib import pyplot as plt
@@ -31,6 +31,7 @@ class EnzymeKinetics():
         if self.substrate is None:
             self.substrate = self.calculate_substrate()
         self._w0 = self._get_w0()
+        self.result_dict: dict = None
 
         self.models: Dict[str, KineticModel] = self.initialize_models()
 
@@ -115,14 +116,37 @@ class EnzymeKinetics():
             model=menten_irreversible_inhibition
         )
 
+        irrev_MM_subabs = KineticModel(
+            name="irreversible Michaelis Menten with absorbing substrate",
+            params=("a"),
+            w0={"cS": self.init_substrate, "cE": self.enzyme, "cP": self.product, "cS0": self.init_substrate},
+            kcat_initial=self._get_kcat(),
+            Km_initial=get_initial_Km(self.substrate, self.time),
+            model=subabs_menten_irreversible
+        )
+
         kinetic_model_dict: Dict[str, KineticModel] = {
             irreversible_MM.name: irreversible_MM,
             irrev_MM_enz_inact.name: irrev_MM_enz_inact,
             irrev_MM_prod_inhib.name: irrev_MM_prod_inhib,
-            irrev_MM_prod_inhib_enz_inact.name: irrev_MM_prod_inhib_enz_inact
+            irrev_MM_prod_inhib_enz_inact.name: irrev_MM_prod_inhib_enz_inact,
+            irrev_MM_subabs.name: irrev_MM_subabs
         }
 
         return kinetic_model_dict
+
+    def evaluate_aic(self):
+        names = []
+        aic = []
+        for model in self.models.values():
+            names.append(model.name)
+            aic.append(model.result.aic)
+
+        result_dict = dict(zip(names, aic))
+        result_dict = {k: v for k, v in sorted(
+            result_dict.items(), key=lambda item: item[1], reverse=False)}
+        return result_dict
+
 
     def fit_models(self):
         for kineticmodel in self.models.values():
@@ -140,16 +164,27 @@ class EnzymeKinetics():
                 ndata, nt = data.shape
                 resid = 0.0 * data[:]  # initialize the residual vector
 
-                # compute residual per data set
                 for i in range(ndata):
 
-                    if len(kineticmodel.w0.keys()) == 3:
+
+                # compute residual per data set
+                    if kineticmodel.name == "irreversible Michaelis Menten" or kineticmodel.name == "irreversible Michaelis Menten with enzyme inactivation":
                         cS, cE, cP = kineticmodel.w0.values()
-                        # TODO: fix initia product concentration
+                            # TODO: fix initia product concentration
                         w0 = (cS[i], cE, 0)
-                    else:
-                        cS, cE, cP, cI = kineticmodel.w0.values()
-                        w0 = w0 = (cS[i], cE, 0, cI)
+
+                    if kineticmodel.name == "irreversible Michaelis Menten with competitive inhibition" or kineticmodel.name == "irreversible Michaelis Menten with competitive inhibition and enzyme inactivation":
+                        if len(kineticmodel.w0.keys()) == 3:
+                            cS, cE, cP = kineticmodel.w0.values()
+                            w0 = (cS[i], cE, 0, 0)
+                        else:
+                            cS, cE, cP, cI = kineticmodel.w0.values()
+                            w0 = (cS[i], cE, 0, cI)
+                            
+                    if kineticmodel.name == "irreversible Michaelis Menten with absorbing substrate":
+                        cS, cE, cP, cS0 = kineticmodel.w0.values()
+                            # TODO: fix initia product concentration
+                        w0 = (cS[i], cE, cP[i,0], cS0[i])
 
                     model = g(t, w0, params)  # solve the ODE with sfb.
 
@@ -161,13 +196,61 @@ class EnzymeKinetics():
 
                 return resid.flatten()
 
+            print(kineticmodel.name)
+            print()
             kineticmodel.result = minimize(residual, kineticmodel.parameters, args=(
                 self.time, self.substrate), method='leastsq', nan_policy='omit')
 
-    def visualize(self, save_to_path="", format="svg"):
-        for model in self.models.values():
-            for i in range(self.substrate.shape[0]):
-                ax = plt.scatter(x=self.time, y=self.substrate[i])
+        self.result_dict = self.evaluate_aic()
+
+
+
+    def visualize_fit(self, model_name: str = None):
+        # TODO: add file directory for save
+        best_model = next(iter(self.result_dict))
+        if model_name is None:
+            model_name = best_model
+
+        model = self.models[model_name]
+        report_fit(model.result)
+
+        def g(t, w0, params):
+                '''
+                Solution to the ODE w'(t)=f(t,w,p) with initial condition w(0)= w0 (= [S0])
+                '''
+                w = odeint(model.model, w0, t, args=(params,))
+                return w
+
+        for i, product in enumerate(self.product):
+            if model.name == "irreversible Michaelis Menten" or model.name == "irreversible Michaelis Menten with enzyme inactivation":
+                cS, cE, cP = model.w0.values()
+                    # TODO: fix initia product concentration
+                w0 = (cS[i], cE, 0)
+
+            if model.name == "irreversible Michaelis Menten with competitive inhibition" or model.name == "irreversible Michaelis Menten with competitive inhibition and enzyme inactivation":
+                if len(model.w0.keys()) == 3:
+                    cS, cE, cP = model.w0.values()
+                    w0 = (cS[i], cE, 0, 0)
+                else:
+                    cS, cE, cP, cI = model.w0.values()
+                    w0 = (cS[i], cE, 0, cI)
+
+            if model.name == "irreversible Michaelis Menten with absorbing substrate":
+                        cS, cE, cP, cS0 = model.w0.values()
+                            # TODO: fix initia product concentration
+                        w0 = (cS[i], cE, cP[i,0], cS0[i])
+
+            ax = plt.scatter(x=self.time, y=product)
+
+            data_fitted = g(t=self.time, w0=w0, params=model.result.params)
+            ay = plt.plot(self.time, data_fitted[:,2])
+        plt.title(model.name)
+        plt.ylabel("p-NA [mM]")
+        plt.xlabel("time [min]")
+        plt.show()
+
+            
+"""
 
                 # Integrate model
                 s0 = self.init_conc[i]
@@ -180,11 +263,11 @@ class EnzymeKinetics():
 
                 data_fitted = self.g(self.time, w0, self.result.params)
                 ax = plt.plot(self.time, data_fitted[:, 0], '-', linewidth=1)
-
+"""
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    from pyenzymekinetics.parameterestimator.helper.load_utitlity import *
+    #from pyenzymekinetics.parameterestimator.helper.load_utitlity import *
     from pyenzymekinetics.calibrator.standardcurve import StandardCurve
     from pyenzymekinetics.calibrator.utility import to_concentration
     import numpy as np
@@ -192,22 +275,24 @@ if __name__ == "__main__":
     cal_conc = np.fromfile("/Users/maxhaussler/master_thesis/code/PyEnzymeKinetics/data/calibration_conc")
     cal_abso = np.fromfile("/Users/maxhaussler/master_thesis/code/PyEnzymeKinetics/data/calibration_abso")
     standardcurve = StandardCurve(cal_conc, cal_abso, "mM")
-    standardcurve.visualize_fit()
 
     conc = np.fromfile("/Users/maxhaussler/master_thesis/code/PyEnzymeKinetics/data/concentration")
     time = np.fromfile("/Users/maxhaussler/master_thesis/code/PyEnzymeKinetics/data/time")
     init_sub = np.array([1, 2.5, 5, 7.5, 10, 20, 30])
     conc = np.reshape(conc, (7,21))
     data = to_concentration(standardcurve, conc)
-    mm = EnzymeKinetics(time=time[:-2], enzyme=0.8, product=data, init_substrate=init_sub)
+    mm = EnzymeKinetics(time=time[:-2], enzyme=0.0008, product=data, init_substrate=init_sub, inhibitor=0.4)
     mm.fit_models()
     for model in mm.models.values():
+        print(f"\n### {model.name} ###")
         report_fit(model.result)
 
+    mm.visualize_fit("irreversible Michaelis Menten with competitive inhibition")
 
 
-    print("hi")
 """
+    print("hi")
+
     # Calibrate
     standardcurve = StandardCurve(calibration_conc, calibration_abso)
     # standardcurve.visualize_fit()
